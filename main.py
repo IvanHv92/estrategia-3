@@ -13,110 +13,95 @@ PARES = [
     "EUR/USD", "EUR/CAD", "EUR/CHF", "EUR/GBP", "EUR/JPY",
     "AUD/CAD", "AUD/CHF", "AUD/USD", "AUD/JPY",
     "USD/CHF", "USD/JPY", "USD/INR", "USD/CAD",
-    "GBP/JPY", "USD/BDT", "USD/MXN",
-    "CAD/JPY", "GBP/CAD", "CAD/CHF", "NZD/CAD", "EUR/AUD"
+    "GBP/JPY", "USD/BDT", "USD/MXN", "CAD/JPY", "GBP/CAD",
+    "CAD/CHF", "NZD/CAD", "EUR/AUD"
 ]
 
-ULTIMAS_SENIALES = {}
-
-# ENVÍO A TELEGRAM
 def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}
     requests.post(url, data=data)
 
-def guardar_csv(fecha, par, tipo, estrategias, precio, expiracion):
-    with open("senales_estrategia_nueva.csv", "a", newline="") as f:
-        csv.writer(f).writerow([fecha, par, tipo, estrategias, round(precio, 5), expiracion])
+def guardar_csv(fecha, par, tipo, estrategia, precio):
+    with open("senales_alligator_macd.csv", "a", newline="") as f:
+        csv.writer(f).writerow([fecha, par, tipo, estrategia, round(precio, 5)])
 
-# OBTENER DATOS
 def obtener_datos(symbol):
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={INTERVAL}&outputsize=100&apikey={API_KEY}"
     r = requests.get(url).json()
     if "values" not in r:
-        print(f"❌ Error al obtener datos de {symbol}")
+        print(f"❌ Error con {symbol}")
         return None
     df = pd.DataFrame(r["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
     df = df.sort_values("datetime")
     df["close"] = df["close"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
     return df
 
-# ANALIZAR CON 3 INDICADORES
-# Indicadores: MACD, Estocástico, CCI
 def analizar(symbol):
     df = obtener_datos(symbol)
     if df is None:
         return
 
+    # Alligator (tres EMAs con periodos diferentes)
+    df["jaw"] = ta.trend.SMAIndicator(df["close"], 13).sma_indicator()
+    df["teeth"] = ta.trend.SMAIndicator(df["close"], 8).sma_indicator()
+    df["lips"] = ta.trend.SMAIndicator(df["close"], 5).sma_indicator()
+
+    # MACD
     macd = ta.trend.MACD(df["close"])
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
 
-    estoc = ta.momentum.StochasticOscillator(df["high"], df["low"], df["close"], window=14, smooth_window=3)
-    df["%k"] = estoc.stoch()
-    df["%d"] = estoc.stoch_signal()
-
-    df["cci"] = ta.trend.CCIIndicator(df["high"], df["low"], df["close"], window=20).cci()
-
     u = df.iloc[-1]
     a = df.iloc[-2]
-    estrategias = []
 
-    # MACD cruzando al alza/abajo
-    if a["macd"] < a["macd_signal"] and u["macd"] > u["macd_signal"]:
-        estrategias.append("MACD CALL")
-    elif a["macd"] > a["macd_signal"] and u["macd"] < u["macd_signal"]:
-        estrategias.append("MACD PUT")
-
-    # Estocástico
-    if u["%k"] > u["%d"] and u["%k"] < 80:
-        estrategias.append("Estocástico CALL")
-    elif u["%k"] < u["%d"] and u["%k"] > 20:
-        estrategias.append("Estocástico PUT")
-
-    # CCI
-    if u["cci"] > 100:
-        estrategias.append("CCI CALL")
-    elif u["cci"] < -100:
-        estrategias.append("CCI PUT")
-
-    # VALIDACIÓN: las 3 deben coincidir
+    estrategia = None
     tipo = None
-    if all("CALL" in e for e in estrategias) and len(estrategias) == 3:
+
+    # Condición Alligator (cruce de medias y separación ordenada)
+    alligator_call = a["lips"] < a["teeth"] < a["jaw"] and u["lips"] > u["teeth"] > u["jaw"]
+    alligator_put = a["lips"] > a["teeth"] > a["jaw"] and u["lips"] < u["teeth"] < u["jaw"]
+
+    # Condición MACD
+    macd_call = a["macd"] < a["macd_signal"] and u["macd"] > u["macd_signal"]
+    macd_put = a["macd"] > a["macd_signal"] and u["macd"] < u["macd_signal"]
+
+    if alligator_call and macd_call:
+        estrategia = "Alligator + MACD CALL"
         tipo = "CALL"
-    elif all("PUT" in e for e in estrategias) and len(estrategias) == 3:
+    elif alligator_put and macd_put:
+        estrategia = "Alligator + MACD PUT"
         tipo = "PUT"
 
-    if tipo:
+    if estrategia:
         fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         mensaje = (
-            f"📊 Nueva estrategia {tipo} en {symbol} ({fecha}):\n"
-            + "\n".join(estrategias) +
-            "\n⏱️ Expiración sugerida: 5 minutos\n"
-            "📈 Confianza: ⭐⭐⭐"
+            f"📊 Señal {tipo} en {symbol} ({fecha}):\n"
+            f"{estrategia}\n"
+            f"⏱️ Expiración sugerida: 5 min\n"
+            f"📈 Confianza: ⭐⭐"
         )
         enviar_telegram(mensaje)
-        guardar_csv(fecha, symbol, tipo, ", ".join(estrategias), u["close"], "5 min")
+        guardar_csv(fecha, symbol, tipo, estrategia, u["close"])
         print(mensaje)
     else:
-        print(f"[{symbol}] ❌ Sin confirmación clara entre los 3 indicadores")
+        print(f"[{symbol}] ❌ Sin señal clara")
 
 def iniciar():
     while True:
-        print("⏳ Analizando todos los pares...")
+        print("\n🔁 Analizando pares con Alligator + MACD...\n")
         for par in PARES:
             analizar(par)
-        print("🕒 Esperando 2 minutos...\n")
-        time.sleep(120)
+        print("🕒 Esperando 1 minuto...\n")
+        time.sleep(60)
 
+# Flask para mantener activo en Render
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Bot activo: MACD + Estocástico + CCI (1min, 5min exp.)"
+    return "✅ Bot activo con estrategia: Alligator + MACD (velas 1 min, expiración 5 min)"
 
 Thread(target=lambda: app.run(host='0.0.0.0', port=8080)).start()
 iniciar()
