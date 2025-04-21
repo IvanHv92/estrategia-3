@@ -3,25 +3,22 @@ import pandas as pd
 import ta
 import time
 from datetime import datetime
-from threading import Thread
 from flask import Flask
+from threading import Thread
 
-# CONFIGURACIÓN GENERAL
-API_KEY = "TU_API_KEY_DE_TWELVE_DATA"
-INTERVAL = "1min"
-TELEGRAM_TOKEN = "TU_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "TU_TELEGRAM_CHAT_ID"
+# CONFIGURACIÓN
+API_KEY = "TU_API_KEY"
+INTERVAL = "2min"
+TELEGRAM_TOKEN = "TU_TELEGRAM_TOKEN"
+TELEGRAM_CHAT_ID = "TU_CHAT_ID"
 
-CRIPTO_PRINCIPALES = [
-    "BTC/USD", "ETH/USD", "XRP/USD", "BNB/USD", "ADA/USD",
-    "DOGE/USD", "SOL/USD", "AVAX/USD", "DOT/USD", "LTC/USD"
-]
+CRIPTOS = ["BTC/USD", "ETH/USD", "XRP/USD", "SOL/USD", "BNB/USD", "ADA/USD"]
 
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "✅ Bot Cripto Eficiente Activo"
+    return "✅ Bot Cripto | Breakout + Divergencia RSI activo."
 
 def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -30,16 +27,12 @@ def enviar_telegram(mensaje):
         "text": mensaje,
         "parse_mode": "Markdown"
     }
-    try:
-        requests.post(url, data=data)
-    except Exception as e:
-        print(f"❌ Error enviando mensaje: {e}")
+    requests.post(url, json=data)
 
 def obtener_datos(symbol):
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={INTERVAL}&outputsize=100&apikey={API_KEY}"
     r = requests.get(url).json()
     if "values" not in r:
-        print(f"❌ Error al obtener datos de {symbol}")
         return None
     df = pd.DataFrame(r["values"])
     df["datetime"] = pd.to_datetime(df["datetime"])
@@ -51,43 +44,72 @@ def obtener_datos(symbol):
 
 def analizar(symbol):
     df = obtener_datos(symbol)
-    if df is None:
+    if df is None or len(df) < 25:
         return
 
+    df["ema20"] = ta.trend.EMAIndicator(df["close"], 20).ema_indicator()
+    df["ema50"] = ta.trend.EMAIndicator(df["close"], 50).ema_indicator()
     df["rsi"] = ta.momentum.RSIIndicator(df["close"], 14).rsi()
-    df["cci"] = ta.trend.CCIIndicator(df["high"], df["low"], df["close"], 20).cci()
-    df["ema"] = ta.trend.EMAIndicator(df["close"], 21).ema_indicator()
+    bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2)
+    df["bb_upper"] = bb.bollinger_hband()
+    df["bb_lower"] = bb.bollinger_lband()
 
     u = df.iloc[-1]
     a = df.iloc[-2]
-    rsi_val = round(u["rsi"], 2)
-    cci_val = round(u["cci"], 2)
-    ema = u["ema"]
-    precio = u["close"]
-
     mensaje = None
+    estrategia_activada = None
 
-    # Señal de COMPRA (CALL)
-    if rsi_val < 28 and cci_val < -120 and precio > ema and precio > a["close"]:
+    # Estrategia 1: Breakout + impulso
+    if a["ema20"] < a["ema50"] and u["ema20"] > u["ema50"] and u["rsi"] > 60 and u["close"] > a["close"]:
         mensaje = (
-            f"🟢 *SEÑAL CALL (Compra)*\n\n"
-            f"🔹 *Cripto:* {symbol}\n"
-            f"📊 RSI: {rsi_val}  |  CCI: {cci_val}\n"
-            f"📈 Precio: {round(precio, 2)} | EMA21: {round(ema, 2)}\n\n"
-            f"✅ Confirmación alcista tras sobreventa\n"
-            f"⏱️ *Velas:* 1 minuto | Expiración sugerida: 2-3 min"
+            f"🟢 *SEÑAL CALL - {symbol}*\n\n"
+            f"✅ Activó: *Breakout + Impulso*\n"
+            f"🔹 EMA20 cruzó EMA50 al alza\n"
+            f"🔹 RSI: {round(u['rsi'], 2)}\n"
+            f"🔹 Cierre superior a la vela previa\n\n"
+            f"⏱️ Expiración sugerida: 3-5 min"
         )
+        estrategia_activada = True
 
-    # Señal de VENTA (PUT)
-    elif rsi_val > 72 and cci_val > 120 and precio < ema and precio < a["close"]:
+    elif a["ema20"] > a["ema50"] and u["ema20"] < u["ema50"] and u["rsi"] < 40 and u["close"] < a["close"]:
         mensaje = (
-            f"🔴 *SEÑAL PUT (Venta)*\n\n"
-            f"🔹 *Cripto:* {symbol}\n"
-            f"📊 RSI: {rsi_val}  |  CCI: {cci_val}\n"
-            f"📉 Precio: {round(precio, 2)} | EMA21: {round(ema, 2)}\n\n"
-            f"✅ Confirmación bajista tras sobrecompra\n"
-            f"⏱️ *Velas:* 1 minuto | Expiración sugerida: 2-3 min"
+            f"🔴 *SEÑAL PUT - {symbol}*\n\n"
+            f"✅ Activó: *Breakout + Impulso*\n"
+            f"🔹 EMA20 cruzó EMA50 a la baja\n"
+            f"🔹 RSI: {round(u['rsi'], 2)}\n"
+            f"🔹 Cierre inferior a la vela previa\n\n"
+            f"⏱️ Expiración sugerida: 3-5 min"
         )
+        estrategia_activada = True
+
+    # Estrategia 2: Bollinger Bands + divergencia RSI
+    if not estrategia_activada:
+        rsi = df["rsi"]
+        close = df["close"]
+        high = df["high"]
+        low = df["low"]
+
+        # Divergencia bajista (precio hace nuevo máximo pero RSI no)
+        if close.iloc[-1] > df["bb_upper"].iloc[-1] and rsi.iloc[-1] < rsi.iloc[-2] and close.iloc[-1] > close.iloc[-2]:
+            mensaje = (
+                f"🔴 *SEÑAL PUT - {symbol}*\n\n"
+                f"✅ Activó: *Bollinger + Divergencia RSI*\n"
+                f"🔹 Precio tocó banda superior\n"
+                f"🔹 RSI no confirma nuevo máximo\n"
+                f"🔹 RSI actual: {round(rsi.iloc[-1], 2)}\n\n"
+                f"⏱️ Expiración sugerida: 3-5 min"
+            )
+
+        # Divergencia alcista (precio hace nuevo mínimo pero RSI no)
+        elif close.iloc[-1] < df["bb_lower"].iloc[-1] and rsi.iloc[-1] > rsi.iloc[-2] and close.iloc[-1] < close.iloc[-2]:
+            mensaje = (
+                f"🟢 *SEÑAL CALL - {symbol}*\n\n"
+                f"✅ Activó: *Bollinger + Divergencia RSI*\n"
+                f"🔹 Precio tocó banda inferior\n"
+                f"🔹 RSI no confirma nuevo mínimo\n"
+                f"🔹 RSI actual: {round(rsi.iloc[-1], 2)}\n\n"
+                f"⏱️ Expiración sugerida: 3-5 min"
+            )
 
     if mensaje:
         enviar_telegram(mensaje)
@@ -97,10 +119,10 @@ def analizar(symbol):
 
 def ejecutar_bot():
     while True:
-        for cripto in CRIPTO_PRINCIPALES:
-            analizar(cripto)
-        print("⏳ Esperando 60 segundos...\n")
-        time.sleep(60)
+        for par in CRIPTOS:
+            analizar(par)
+        print("⏳ Esperando 2 minutos...\n")
+        time.sleep(120)
 
 if __name__ == "__main__":
     Thread(target=lambda: app.run(host='0.0.0.0', port=8080)).start()
